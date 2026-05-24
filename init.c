@@ -123,13 +123,13 @@ int main(int argc, char *argv[]) {
     mkdir("/var", 0755);
     mkdir("/var/log", 0755);
 
-    /* Создаём стандартные директории (/tmp, /run/lock и т.д.) */
+    /* создаём стандартные директории (/tmp, /run/lock и т.д.) */
     create_standard_dirs();
 
     do_log("================================\n");
-    do_log("init started. wilix oneinit v0.8\n");
+    do_log("init started. wilix oneinit v0.9\n");
 
-    /* Пишем PID init в файл */
+    /* пишем пид init в файл */
     write_pid_file("init", getpid());
 
     parse_cmdline();
@@ -254,7 +254,7 @@ static int telinit_main(int argc, char *argv[]) {
 
 static int instatus_main(int argc, char *argv[]) {
     (void)argc; (void)argv;
-    printf("\033[1;36m=== wilix v0.8 init status ===\033[0m\n");
+    printf("\033[1;36m=== wilix v0.9 init status ===\033[0m\n");
     FILE *f = fopen("/run/init_status", "r");
     if (!f) return 1;
     char line[256];
@@ -303,7 +303,7 @@ static void clear_screen(void) {
 
 static void print_banner(void) {
     printf("\033[0;34m========\033[1;34m========\033[0;36m========\033[1;36m================\033[0m\n\n");
-    printf("\033[1;36m  wilix v0.8 \033[1;30m//\033[1;36m oneinit v0.8\033[0m\n\n");
+    printf("\033[1;36m  wilix v0.9 \033[1;30m//\033[1;36m oneinit v0.9\033[0m\n\n");
     printf("  welcome!\n");
     printf("\033[0;34m========\033[1;34m========\033[0;36m========\033[1;36m================\033[0m\n\n");
 }
