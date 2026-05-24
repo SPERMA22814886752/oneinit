@@ -34,6 +34,7 @@ static void do_log(const char *fmt, ...);
 static void print_status(const char *color, const char *bracket_text, const char *msg);
 static void silence_kernel_logs(void);
 static int do_mount(const char *source, const char *target, const char *fstype, unsigned long flags);
+static int do_mount_opts(const char *source, const char *target, const char *fstype, unsigned long flags, const char *opts);
 static void parse_cmdline(void);
 static void setup_console_and_tty(void);
 static void set_env(void);
@@ -49,6 +50,11 @@ static void graceful_shutdown(void);
 static int run_busybox(char *const argv[]);
 static void setup_ipc(void);
 static void update_status_file(void);
+static void setup_devpts(void);
+static void write_pid_file(const char *name, pid_t pid);
+static void setup_loopback(void);
+static void set_timezone(void);
+static void create_standard_dirs(void);
 
 static int telinit_main(int argc, char *argv[]);
 static int instatus_main(int argc, char *argv[]);
@@ -107,18 +113,24 @@ int main(int argc, char *argv[]) {
     mknod("/dev/null", S_IFCHR | 0666, makedev(1, 3));
     mknod("/dev/zero", S_IFCHR | 0666, makedev(1, 5));
     mknod("/dev/tty", S_IFCHR | 0666, makedev(5, 0));
-    
-    mkdir("/dev/pts", 0755);
-    do_mount("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC);
 
     mknod("/dev/tty1", S_IFCHR | 0666, makedev(4, 1));
     mknod("/dev/tty2", S_IFCHR | 0666, makedev(4, 2));
 
+    /* /dev/pts монтируем */
+    setup_devpts();
+
     mkdir("/var", 0755);
     mkdir("/var/log", 0755);
 
+    /* Создаём стандартные директории (/tmp, /run/lock и т.д.) */
+    create_standard_dirs();
+
     do_log("================================\n");
     do_log("init started. wilix oneinit v0.8\n");
+
+    /* Пишем PID init в файл */
+    write_pid_file("init", getpid());
 
     parse_cmdline();
     setup_ipc(); 
@@ -134,16 +146,20 @@ int main(int argc, char *argv[]) {
     setup_console_and_tty();
     set_env();
     set_hostname();
+    set_timezone();
 
     install_busybox_symlinks();
     load_kernel_modules();
     install_own_symlinks();
 
-    /* Очистка и отрисовка красивого интерфейса */
+    /* поднимаем loopback */
+    setup_loopback();
+
+    /* очистка и отрисовка красивого интерфейса */
     clear_screen();
     print_banner();
 
-    /* Запуск служб с красивым выводом */
+    /* запуск служб с красивым выводом */
     run_init_scripts();
 
     /* Секьюрность */
@@ -170,7 +186,7 @@ int main(int argc, char *argv[]) {
 
     int fifo_fd = open("/run/initctl", O_RDWR | O_NONBLOCK);
 
-    /* Главный цикл */
+    /* главный цикл */
     while (!shutdown_requested) {
         if (current_runlevel == 3 || current_runlevel == 5) {
             for (int i = 0; i < 2; i++) {
@@ -250,23 +266,23 @@ static int instatus_main(int argc, char *argv[]) {
 
 /* ================== ВНУТРЯНКА INIT ================== */
 
-/* Глушим ядро, чтобы printk не мусорил поверх нашего баннера */
+/* глушим ядро, чтобы printk не мусорил поверх нашего баннера */
 static void silence_kernel_logs(void) {
     int fd = open("/proc/sys/kernel/printk", O_WRONLY);
     if (fd >= 0) {
-        write(fd, "3 4 1 3\n", 8); /* Оставляем только критические ошибки ядра */
+        write(fd, "3 4 1 3\n", 8); /* оставляем только критические ошибки ядра */
         close(fd);
     }
 }
 
-/* Красивый вывод статуса + запись в лог файл */
+/* красивый вывод статуса + запись в лог файл */
 static void print_status(const char *color, const char *bracket_text, const char *msg) {
     printf("[\033[%sm%s\033[0m] %s\n", color, bracket_text, msg);
-    fflush(stdout); /* Обязательно выталкиваем на экран перед возможным скриптом */
+    fflush(stdout); /* обязательно выталкиваем на экран перед возможным скриптом */
     do_log("[%s] %s\n", bracket_text, msg); 
 }
 
-/* Запись ТОЛЬКО в файл, чтобы не дублировать на экране и не мусорить в kmsg */
+/* запись ТОЛЬКО в файл, чтобы не дублировать на экране и не мусорить в kmsg */
 static void do_log(const char *fmt, ...) {
     va_list args;
     FILE *f = fopen("/var/log/init.log", "a");
@@ -286,12 +302,9 @@ static void clear_screen(void) {
 }
 
 static void print_banner(void) {
-    /* Синяя полоса */
-    printf("\033[0;34m========================================\033[0m\n");
-    /* Голубой текст */
+    printf("\033[0;34m========\033[1;34m========\033[0;36m========\033[1;36m================\033[0m\n\n");
     printf("\033[1;36m  wilix v0.8 \033[1;30m//\033[1;36m oneinit v0.8\033[0m\n\n");
     printf("  welcome!\n");
-    /* Градиентная полоса (От темного синего к светлому и голубому) */
     printf("\033[0;34m========\033[1;34m========\033[0;36m========\033[1;36m================\033[0m\n\n");
 }
 
@@ -315,7 +328,7 @@ static void run_init_scripts(void) {
             snprintf(path, sizeof(path), "/etc/init.d/%s", namelist[i]->d_name);
             if (access(path, X_OK) != 0) continue;
 
-            /* Желтый WAIT с ровными отступами */
+            /* желтый меллстрой */
             print_status("1;33", "  WAIT  ", namelist[i]->d_name);
             
             pid_t pid = fork();
@@ -328,7 +341,7 @@ static void run_init_scripts(void) {
             int status;
             waitpid(pid, &status, 0);
             
-            /* Проверка кода возврата скрипта */
+            /* проверка кода возврата скрипта */
             if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
                 print_status("1;32", "   OK   ", namelist[i]->d_name);
             } else {
@@ -341,7 +354,157 @@ static void run_init_scripts(void) {
     free(namelist);
 }
 
-/* ОСТАЛЬНЫЕ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ) */
+static void setup_devpts_for(void) {
+    print_status("1;33", "  WAIT  ", "mounting /dev/pts");
+
+    /* создаём точку монтирования если её ещё нет */
+    if (mkdir("/dev/pts", 0755) != 0 && errno != EEXIST) {
+        do_log("warning: cannot mkdir /dev/pts: %s\n", strerror(errno));
+    }
+
+    const char *opts = "ptmxmode=0666,gid=5,mode=0620,newinstance";
+    if (mount("devpts", "/dev/pts", "devpts",
+              MS_NOSUID | MS_NOEXEC, opts) != 0) {
+        if (errno == EBUSY) {
+            /* Уже смонтировано — попробуем без newinstance (старые ядра) */
+            do_log("devpts busy, retrying without newinstance\n");
+            mount("devpts", "/dev/pts", "devpts",
+                  MS_NOSUID | MS_NOEXEC, "ptmxmode=0666,gid=5,mode=0620");
+        } else {
+            do_log("mount fail: devpts on /dev/pts: %s\n", strerror(errno));
+            print_status("1;31", "  FAIL  ", "failed to mount /dev/pts");
+            return;
+        }
+    }
+
+    unlink("/dev/ptmx"); /* убираем старый chardev если был */
+    if (symlink("/dev/pts/ptmx", "/dev/ptmx") != 0 && errno != EEXIST) {
+        do_log("ptmx symlink failed (%s), creating chardev\n", strerror(errno));
+        mknod("/dev/ptmx", S_IFCHR | 0666, makedev(5, 2));
+        chown("/dev/ptmx", 0, 5); /* root:tty */
+        chmod("/dev/ptmx", 0666);
+    }
+
+    print_status("1;32", "   OK   ", "/dev/pts mounted, /dev/ptmx ready");
+    do_log("devpts mounted with opts: %s\n", opts);
+}
+
+static void write_pid_file(const char *name, pid_t pid) {
+    char path[128];
+    snprintf(path, sizeof(path), "/run/%s.pid", name);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fprintf(f, "%d\n", (int)pid);
+        fclose(f);
+        do_log("pid file written: %s = %d\n", path, (int)pid);
+    } else {
+        do_log("warning: cannot write pid file %s: %s\n", path, strerror(errno));
+    }
+}
+
+static void setup_loopback(void) {
+    print_status("1;33", "  WAIT  ", "bringing up loopback interface");
+
+    /* ip link set lo up */
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/bin/busybox", "busybox", "ip", "link", "set", "lo", "up", (char *)NULL);
+        /* фолбэк через ifconfig если ip недоступен */
+        execl("/bin/busybox", "busybox", "ifconfig", "lo", "up", (char *)NULL);
+        _exit(1);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+
+    /* ip addr add 127.0.0.1/8 dev lo */
+    pid = fork();
+    if (pid == 0) {
+        execl("/bin/busybox", "busybox", "ip", "addr", "add",
+              "127.0.0.1/8", "dev", "lo", (char *)NULL);
+        execl("/bin/busybox", "busybox", "ifconfig", "lo",
+              "127.0.0.1", "netmask", "255.0.0.0", (char *)NULL);
+        _exit(1);
+    }
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        print_status("1;32", "   OK   ", "loopback interface is up");
+    } else {
+        /* Не фатально — логируем и идём дальше */
+        print_status("1;33", "  WARN  ", "loopback setup returned non-zero (may already be up)");
+    }
+    do_log("loopback interface configured\n");
+}
+
+static void set_timezone(void) {
+    FILE *f = fopen("/etc/timezone", "r");
+    if (!f) {
+        do_log("no /etc/timezone found, using UTC\n");
+        return;
+    }
+
+    char tz[128] = {0};
+    if (fgets(tz, sizeof(tz), f)) {
+        tz[strcspn(tz, "\r\n")] = '\0';
+    }
+    fclose(f);
+
+    if (tz[0] == '\0') {
+        do_log("empty /etc/timezone, using UTC\n");
+        return;
+    }
+
+    /* выставляем tz в виде :/usr/share/zoneinfo/Region/City */
+    char tz_env[160];
+    snprintf(tz_env, sizeof(tz_env), "/usr/share/zoneinfo/%s", tz);
+    if (access(tz_env, F_OK) == 0) {
+        char tz_val[164];
+        snprintf(tz_val, sizeof(tz_val), ":%s", tz_env);
+        setenv("TZ", tz_val, 1);
+    } else {
+        /* фолбэк: выставляем имя напрямую (posix-формат если zoneinfo нет) */
+        setenv("TZ", tz, 1);
+    }
+    tzset();
+    do_log("timezone set to: %s\n", tz);
+}
+
+static void create_standard_dirs(void) {
+    /* /tmp — нужен практически всем */
+    if (mkdir("/tmp", 01777) != 0 && errno != EEXIST)
+        do_log("warning: cannot mkdir /tmp: %s\n", strerror(errno));
+    chmod("/tmp", 01777); /* sticky bit */
+
+    /* /run/lock — lockfile-совместимость */
+    if (mkdir("/run/lock", 01777) != 0 && errno != EEXIST)
+        do_log("warning: cannot mkdir /run/lock: %s\n", strerror(errno));
+    chmod("/run/lock", 01777);
+
+    /* /run/dropbear — dropbear кладёт сюда host keys и pid */
+    if (mkdir("/run/dropbear", 0700) != 0 && errno != EEXIST)
+        do_log("warning: cannot mkdir /run/dropbear: %s\n", strerror(errno));
+
+    /* /var/run -> /run (symlink для совместимости со старыми скриптами) */
+    if (symlink("/run", "/var/run") != 0 && errno != EEXIST)
+        do_log("note: /var/run symlink: %s\n", strerror(errno));
+
+    /* /var/tmp — временные файлы, переживающие перезагрузку (если /var на диске) */
+    if (mkdir("/var/tmp", 01777) != 0 && errno != EEXIST)
+        do_log("warning: cannot mkdir /var/tmp: %s\n", strerror(errno));
+
+    do_log("standard directories created\n");
+}
+
+static int do_mount_opts(const char *source, const char *target,
+                         const char *fstype, unsigned long flags,
+                         const char *opts) {
+    if (mount(source, target, fstype, flags, opts) != 0 && errno != EBUSY) {
+        do_log("mount fail: %s on %s (%s)\n", source, target, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 static void setup_ipc(void) {
     unlink("/run/initctl");
     if (mkfifo("/run/initctl", 0600) != 0) do_log("failed to create /run/initctl\n");
@@ -487,7 +650,6 @@ static void install_busybox_symlinks(void) {
 
     pid_t pid = fork();
     if (pid == 0) {
-        // Дочерний процесс: перенаправляем stdout в пайп и вызываем busybox --list
         close(pfd[0]);
         dup2(pfd[1], STDOUT_FILENO);
         close(pfd[1]);
@@ -495,25 +657,19 @@ static void install_busybox_symlinks(void) {
         _exit(1);
     }
 
-    // Родительский процесс
     close(pfd[1]);
     FILE *stream = fdopen(pfd[0], "r");
     if (stream) {
         char cmd[128];
         char link_path[256];
         
-        // Читаем каждую команду, которую выплюнул busybox --list
         while (fgets(cmd, sizeof(cmd), stream)) {
-            // Убираем символ переноса строки \n
             cmd[strcspn(cmd, "\r\n")] = 0;
             if (cmd[0] == '\0') continue;
 
-            // Формируем путь, куда положить ссылку (все пихаем в /bin)
             snprintf(link_path, sizeof(link_path), "/bin/%s", cmd);
 
-            // Создаем симлинк. Если он уже есть, errno = EEXIST, это нормально, игнорируем
             if (symlink("/bin/busybox", link_path) != 0 && errno != EEXIST) {
-                // Если не получилось, можно тихонько логгировать, но экран не засираем
                 do_log("warning: failed to link %s: %s\n", link_path, strerror(errno));
             }
         }
@@ -532,13 +688,10 @@ static void load_kernel_modules(void) {
         return;
     }
 
-    // Вызываем "modprobe -a", чтобы загрузить конкретные критические модули
-    // Busybox modprobe сам найдет их в /lib/modules/YOUR_KERNEL_VERSION/
     print_status("1;33", "  WAIT  ", "loading graphics modules");
     
     pid_t pid = fork();
     if (pid == 0) {
-        // Загружаем наш графический стек одной командой
         execl("/bin/busybox", "busybox", "modprobe", "-a", "simpledrm", "bochs", "xe", (char *)NULL);
         _exit(1);
     }
